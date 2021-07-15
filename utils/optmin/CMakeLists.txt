@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.10)
 
 project(optimin
     LANGUAGES CXX
@@ -9,12 +9,10 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-find_package(Boost COMPONENTS container REQUIRED)
-message(STATUS "Found Boost ${Boost_VERSION_STRING}")
+find_package(LLVM REQUIRED CONFIG)
+message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3")
-
-include_directories(${Boost_INCLUDE_DIR})
 
 add_subdirectory(EvalMaxSAT)
 add_subdirectory(src)

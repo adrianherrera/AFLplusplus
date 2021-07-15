@@ -9,10 +9,11 @@
 #include <dirent.h>
 #include <fstream>
 #include <iostream>
-#include <vector>
+#include <map>
 
-#include <boost/container/flat_map.hpp>
-#include <boost/container/flat_set.hpp>
+#include <llvm/ADT/DenseSet.h>
+#include <llvm/ADT/DenseMap.h>
+#include <llvm/ADT/SmallVector.h>
 
 #include "ProgressBar.h"
 #include "EvalMaxSAT.h"
@@ -46,25 +47,24 @@ using AFLTuple =
     std::pair</* Tuple ID */ uint32_t, /* Execution count */ unsigned>;
 
 /// Coverage for a given seed file
-using AFLCoverageVector = std::vector<AFLTuple>;
+using AFLCoverageVector = llvm::SmallVector<AFLTuple, 0>;
 
 /// Maps seed file paths to a weight
 using WeightsMap =
     std::map</* Seed file */ std::string, /* Seed weight */ WeightT>;
 
 /// A seed identifier in the MaxSAT solver
-using MaxSATIdentifier = int;
+using SeedID = int;
 
-/// Maps literal identifiers to seed files
-using MaxSATMap = boost::container::flat_map<MaxSATIdentifier,
-                                             /* Seed file */ std::string>;
+/// Maps seed identifiers to seed files
+using MaxSATSeeds =
+    llvm::SmallVector<std::pair<SeedID, /* Seed file */ std::string>, 0>;
 
 /// Set of literal identifiers
-using MaxSATLiteralSet = boost::container::flat_set<MaxSATIdentifier>;
+using MaxSATSeedSet = llvm::DenseSet<SeedID>;
 
 /// Maps tuple IDs to the literal identifiers that "cover" that tuple
-using MaxSATCoverageMap =
-    boost::container::flat_map<AFLTuple::first_type, MaxSATLiteralSet>;
+using MaxSATCoverageMap = llvm::DenseMap<AFLTuple::first_type, MaxSATSeedSet>;
 
 // -------------------------------------------------------------------------- //
 // Global variables
@@ -214,7 +214,7 @@ int main(int Argc, char *Argv[]) {
   DIR *             DirFD;
   AFLCoverageVector Cov;
 
-  MaxSATMap         SeedLiterals;
+  MaxSATSeeds       SeedLiterals;
   MaxSATCoverageMap SeedCoverage;
 
   if (!ShowProg)
@@ -240,8 +240,8 @@ int main(int Argc, char *Argv[]) {
     IFS.close();
 
     // Create a literal to represent the seed
-    const MaxSATIdentifier SeedLit = Solver->newVar();
-    SeedLiterals.emplace(SeedLit, DP->d_name);
+    const SeedID SeedLit = Solver->newVar();
+    SeedLiterals.push_back({SeedLit, DP->d_name});
 
     // Record the set of seeds that cover a particular edge
     for (const auto &[Edge, Freq] : Cov) {
