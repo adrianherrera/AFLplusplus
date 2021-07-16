@@ -3,8 +3,8 @@
  *
  *  Adapted from https://www.bfilipek.com/2020/02/inidicators.html
  */
-#ifndef PROGRESS_BAR_H
-#define PROGRESS_BAR_H
+
+#pragma once
 
 #include <iostream>
 
@@ -54,5 +54,3 @@ class ProgressBar {
     OS << "  " << Status;
   }
 };
-
-#endif

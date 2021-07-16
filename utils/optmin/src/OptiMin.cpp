@@ -8,15 +8,21 @@
 #include <cstdint>
 #include <dirent.h>
 #include <fstream>
-#include <iostream>
-#include <map>
 
 #include <llvm/ADT/DenseSet.h>
 #include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/SmallVector.h>
+#include <llvm/ADT/StringExtras.h>
+#include <llvm/ADT/StringMap.h>
+#include <llvm/Support/FileSystem.h>
+#include <llvm/Support/MemoryBuffer.h>
+#include <llvm/Support/Path.h>
+#include <llvm/Support/Program.h>
 
-#include "ProgressBar.h"
 #include "EvalMaxSAT.h"
+#include "ProgressBar.h"
+
+using namespace llvm;
 
 namespace {
 
@@ -42,29 +48,24 @@ class WeightT {
 // Typedefs
 // -------------------------------------------------------------------------- //
 
-/// Pair of tuple (edge) ID and hit count
-using AFLTuple =
-    std::pair</* Tuple ID */ uint32_t, /* Execution count */ unsigned>;
-
-/// Coverage for a given seed file
-using AFLCoverageVector = llvm::SmallVector<AFLTuple, 0>;
+/// AFL tuiple (edge) ID
+using AFLTupleID = uint32_t;
 
 /// Maps seed file paths to a weight
-using WeightsMap =
-    std::map</* Seed file */ std::string, /* Seed weight */ WeightT>;
+using WeightsMap = StringMap<WeightT>;
 
 /// A seed identifier in the MaxSAT solver
 using SeedID = int;
 
-/// Maps seed identifiers to seed files
+/// Associates seed identifiers to seed files
 using MaxSATSeeds =
-    llvm::SmallVector<std::pair<SeedID, /* Seed file */ std::string>, 0>;
+    SmallVector<std::pair<SeedID, /* Seed file */ std::string>, 0>;
 
 /// Set of literal identifiers
-using MaxSATSeedSet = llvm::DenseSet<SeedID>;
+using MaxSATSeedSet = DenseSet<SeedID>;
 
 /// Maps tuple IDs to the literal identifiers that "cover" that tuple
-using MaxSATCoverageMap = llvm::DenseMap<AFLTuple::first_type, MaxSATSeedSet>;
+using MaxSATCoverageMap = DenseMap<AFLTupleID, MaxSATSeedSet>;
 
 // -------------------------------------------------------------------------- //
 // Global variables
@@ -72,6 +73,12 @@ using MaxSATCoverageMap = llvm::DenseMap<AFLTuple::first_type, MaxSATSeedSet>;
 
 static std::chrono::time_point<std::chrono::steady_clock> StartTime, EndTime;
 static std::chrono::seconds                               Duration;
+
+static char *                 TargetProg;
+static SmallVector<StringRef, 8> TargetArgs;
+
+static unsigned Timeout = 0;
+static unsigned MemLimit = 0;
 
 // This is based on the human class count in `count_class_human[256]` in
 // `afl-showmap.c`
@@ -86,7 +93,7 @@ void GetWeights(std::istream &IS, WeightsMap &Weights) {
     const std::string Seed = Line.substr(0, DelimPos).c_str();
     const unsigned    Weight = std::stoul(Line.substr(DelimPos + 1));
 
-    Weights.emplace(Seed, Weight);
+    Weights.try_emplace(Seed, Weight);
   }
 }
 
@@ -102,28 +109,47 @@ size_t GetNumSeeds(DIR *FD) {
   return SeedCount;
 }
 
-void GetAFLCoverage(std::istream &IS, AFLCoverageVector &Cov) {
-  std::string Line;
+ErrorOr<std::unique_ptr<MemoryBuffer>> GetAFLCoverage(const StringRef Seed) {
+  // Find afl-showmap
+  static const auto AFLShowmapOrErr = sys::findProgramByName("afl-showmap");
+  if (const auto EC = AFLShowmapOrErr.getError()) return EC;
 
-  while (std::getline(IS, Line, '\n')) {
-    const size_t   DelimPos = Line.find(':');
-    const uint32_t E = std::stoul(Line.substr(0, DelimPos));
-    const unsigned Freq = std::stoul(Line.substr(DelimPos + 1));
+  // Create temporary output file
+  SmallString<256> OutputPath;
+  const auto EC = sys::fs::createTemporaryFile("showmap", "out", OutputPath);
+  if (EC) return EC;
 
-    Cov.push_back({E, Freq});
-  }
+  // Run afl-showmap
+  SmallVector<StringRef, 12> AFLShowmapArgs{"-m",
+                                            utostr(MemLimit),
+                                            "-t",
+                                            utostr(Timeout),
+                                            /* Binary mode */ "-b",
+                                            "-A",
+                                            Seed,
+                                            "-o",
+                                            OutputPath,
+                                            "--",
+                                            TargetProg};
+  AFLShowmapArgs.append(TargetArgs.begin(), TargetArgs.end());
+  sys::ExecuteAndWait(*AFLShowmapOrErr, AFLShowmapArgs, /*env=*/None,
+                      /*redirects=*/{}, Timeout, MemLimit);
+
+  // Read afl-showmap output
+  return MemoryBuffer::getFile(OutputPath);
 }
 
 static void Usage(const char *Argv0) {
-  std::cerr << '\n' << Argv0 << " [ options ] -- /path/to/corpus_dir\n\n";
-  std::cerr << "Required parameters:\n\n";
-  std::cerr << "  -o         - Output WCNF (DIMACS) file\n\n";
-  std::cerr << "Optional parameters:\n\n";
-  std::cerr << "  -p         - Show progress bar\n";
-  std::cerr << "  -e         - Use edge coverage only, ignore hit counts\n";
-  std::cerr << "  -h         - Print this message\n";
-  std::cerr << "  -w weights - CSV containing seed weights (see README)\n\n";
-  std::cerr << std::endl;
+  errs() << '\n' << Argv0 << " [ options ] -- /path/to/target_app [...]\n\n";
+  errs() << "Required parameters:\n\n";
+  errs() << "  -i dir     - Corpus directory\n";
+  errs() << "Optional parameters:\n\n";
+  errs() << "  -p         - Show progress bar\n";
+  errs() << "  -m megs    - Memory limit for child process (0 MB)\n";
+  errs() << "  -t msec    - Timeout for each seed run (none)\n";
+  errs() << "  -e         - Use edge coverage only, ignore hit counts\n";
+  errs() << "  -h         - Print this message\n";
+  errs() << "  -w weights - CSV containing seed weights (see README)\n\n";
 
   std::exit(1);
 }
@@ -138,27 +164,53 @@ static inline void EndTimer(bool ShowProg) {
       std::chrono::duration_cast<std::chrono::seconds>(EndTime - StartTime);
 
   if (ShowProg)
-    std::cout << std::endl;
+    outs() << '\n';
   else
-    std::cout << Duration.count() << 's' << std::endl;
+    outs() << Duration.count() << "s\n";
 }
 
 int main(int Argc, char *Argv[]) {
-  bool        ShowProg = false;
-  bool        EdgesOnly = false;
-  std::string WeightsFile;
-  WeightsMap  Weights;
-  int         Opt;
-  ProgressBar Prog;
+  SmallString<32> CorpusDir;
+  bool            ShowProg = false;
+  bool            EdgesOnly = false;
+  std::string     WeightsFile;
+  WeightsMap      Weights;
+  int             Opt;
+  ProgressBar     Prog;
 
-  std::cout << "afl-showmap corpus minimization\n\n";
+  outs() << "afl-showmap corpus minimization\n\n";
 
+  // ------------------------------------------------------------------------ //
   // Parse command-line options
-  while ((Opt = getopt(Argc, Argv, "+pehw:")) > 0) {
+  // ------------------------------------------------------------------------ //
+ 
+  while ((Opt = getopt(Argc, Argv, "+i:pm:t:ehw:")) > 0) {
     switch (Opt) {
+      case 'i':
+        // Input directory
+        CorpusDir = optarg;
+        break;
       case 'p':
         // Show progres bar
         ShowProg = true;
+        break;
+      case 'm':
+        // Memory limit
+        if (strcmp(optarg, "none")) {
+          if (!to_integer(optarg, MemLimit, 10)) {
+            errs() << "[-] Invalid memory limit: " << optarg << '\n';
+            return 1;
+          }
+        }
+        break;
+      case 't':
+        // Timeout
+        if (strcmp(optarg, "none")) {
+          if (!to_integer(optarg, Timeout, 10)) {
+            errs() << "[-] Invalid timeout: " << optarg << '\n';
+            return 1;
+          }
+        }
         break;
       case 'e':
         // Solve for edge coverage only (not frequency of edge coverage)
@@ -177,8 +229,11 @@ int main(int Argc, char *Argv[]) {
     }
   }
 
-  if (optind >= Argc) Usage(Argv[0]);
-  const char *CorpusDir = Argv[optind];
+  if (optind == Argc || CorpusDir == "") Usage(Argv[0]);
+
+  TargetProg = Argv[optind];
+  for (unsigned I = optind + 1; optind < Argc; ++I)
+    TargetArgs.push_back(Argv[I]);
 
   // ------------------------------------------------------------------------ //
   // Parse weights
@@ -188,8 +243,7 @@ int main(int Argc, char *Argv[]) {
   // ------------------------------------------------------------------------ //
 
   if (!WeightsFile.empty()) {
-    std::cout << "[*] Reading weights from `" << WeightsFile << "`... "
-              << std::flush;
+    outs() << "[*] Reading weights from `" << WeightsFile << "`... ";
     StartTimer(ShowProg);
 
     std::ifstream IFS(WeightsFile);
@@ -200,7 +254,7 @@ int main(int Argc, char *Argv[]) {
   }
 
   std::unique_ptr<EvalMaxSAT> Solver =
-      std::make_unique<EvalMaxSAT>(/* nbMinimizeThread */ 0);
+      std::make_unique<EvalMaxSAT>(/*nbMinimizeThread=*/0);
 
   // ------------------------------------------------------------------------ //
   // Get seed coverage
@@ -210,20 +264,17 @@ int main(int Argc, char *Argv[]) {
   // data structures.
   // ------------------------------------------------------------------------ //
 
-  struct dirent *   DP;
-  DIR *             DirFD;
-  AFLCoverageVector Cov;
+  struct dirent *DP;
+  DIR *          DirFD;
 
   MaxSATSeeds       SeedLiterals;
   MaxSATCoverageMap SeedCoverage;
 
-  if (!ShowProg)
-    std::cout << "[*] Reading coverage in `" << CorpusDir << "`... "
-              << std::flush;
+  if (!ShowProg) outs() << "[*] Reading coverage in `" << CorpusDir << "`... ";
   StartTimer(ShowProg);
 
-  if ((DirFD = opendir(CorpusDir)) == nullptr) {
-    std::cerr << "[-] Unable to open corpus directory" << std::endl;
+  if ((DirFD = opendir(CorpusDir.c_str())) == nullptr) {
+    errs() << "[-] Unable to open corpus directory\n";
     return 1;
   }
 
@@ -234,17 +285,27 @@ int main(int Argc, char *Argv[]) {
     if (DP->d_type == DT_DIR) continue;
 
     // Get seed coverage
-    std::ifstream IFS(std::string(CorpusDir) + '/' + DP->d_name);
-    Cov.clear();
-    GetAFLCoverage(IFS, Cov);
-    IFS.close();
+    SmallString<32> Seed{CorpusDir};
+    sys::path::append(Seed, DP->d_name);
+    auto CovOrErr = GetAFLCoverage(Seed);
+    if (const auto EC = CovOrErr.getError()) {
+      errs() << "[-] Unable to get coverage for seed " << DP->d_name << ": "
+             << EC.message() << '\n';
+      return 1;
+    }
+    const auto Cov = std::move(CovOrErr.get());
 
     // Create a literal to represent the seed
     const SeedID SeedLit = Solver->newVar();
     SeedLiterals.push_back({SeedLit, DP->d_name});
 
     // Record the set of seeds that cover a particular edge
-    for (const auto &[Edge, Freq] : Cov) {
+    unsigned Edge = 0;
+    for (const char *Ptr = Cov->getBufferStart(), *End = Cov->getBufferEnd();
+         Ptr != End; ++Ptr, ++Edge) {
+      const unsigned Freq = *Ptr;
+
+      if (!Freq) continue;
       if (EdgesOnly) {
         // Ignore edge frequency
         SeedCoverage[Edge].insert(SeedLit);
@@ -266,7 +327,7 @@ int main(int Argc, char *Argv[]) {
   // Set the hard and soft constraints in the solver
   // ------------------------------------------------------------------------ //
 
-  if (!ShowProg) std::cout << "[*] Generating constraints... " << std::flush;
+  if (!ShowProg) outs() << "[*] Generating constraints... ";
   StartTimer(ShowProg);
 
   SeedCount = 0;
@@ -294,7 +355,7 @@ int main(int Argc, char *Argv[]) {
   // Generate a solution
   // ------------------------------------------------------------------------ //
 
-  if (!ShowProg) std::cout << "[*] Solving..." << std::flush;
+  if (!ShowProg) outs() << "[*] Solving...";
   StartTimer(ShowProg);
 
   const bool Solved = Solver->solve();
@@ -307,10 +368,10 @@ int main(int Argc, char *Argv[]) {
 
   if (Solved) {
     for (const auto &[Literal, Seed] : SeedLiterals)
-      std::cout << Seed << ": " << Solver->getValue(Literal) << std::endl;
+      outs() << Seed << ": " << Solver->getValue(Literal) << '\n';
   } else {
-    std::cerr << "[-] Unable to find an optimal solution for " << CorpusDir
-              << std::endl;
+    errs() << "[-] Unable to find an optimal solution for " << CorpusDir
+           << '\n';
     return 1;
   }
 
