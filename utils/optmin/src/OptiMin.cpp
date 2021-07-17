@@ -1,13 +1,13 @@
 /*
- * An optimal fuzzing corpus minimizer.
+ * OptiMin, an optimal fuzzing corpus minimizer.
  *
  * Author: Adrian Herrera
  */
 
 #include <chrono>
 #include <cstdint>
-#include <dirent.h>
 #include <fstream>
+#include <vector>
 
 #include <llvm/ADT/DenseSet.h>
 #include <llvm/ADT/DenseMap.h>
@@ -74,8 +74,9 @@ using MaxSATCoverageMap = DenseMap<AFLTupleID, MaxSATSeedSet>;
 static std::chrono::time_point<std::chrono::steady_clock> StartTime, EndTime;
 static std::chrono::seconds                               Duration;
 
-static char *                 TargetProg;
+static char *                    TargetProg;
 static SmallVector<StringRef, 8> TargetArgs;
+static std::string               AFLShowmapPath;
 
 static unsigned Timeout = 0;
 static unsigned MemLimit = 0;
@@ -84,6 +85,10 @@ static unsigned MemLimit = 0;
 // `afl-showmap.c`
 static constexpr uint32_t MAX_EDGE_FREQ = 8;
 }  // anonymous namespace
+
+// -------------------------------------------------------------------------- //
+// Helper functions
+// -------------------------------------------------------------------------- //
 
 void GetWeights(std::istream &IS, WeightsMap &Weights) {
   std::string Line;
@@ -97,23 +102,7 @@ void GetWeights(std::istream &IS, WeightsMap &Weights) {
   }
 }
 
-size_t GetNumSeeds(DIR *FD) {
-  struct dirent *DP;
-  size_t         SeedCount = 0;
-
-  while ((DP = readdir(FD)) != nullptr)
-    if (DP->d_type == DT_REG) ++SeedCount;
-
-  rewinddir(FD);
-
-  return SeedCount;
-}
-
 ErrorOr<std::unique_ptr<MemoryBuffer>> GetAFLCoverage(const StringRef Seed) {
-  // Find afl-showmap
-  static const auto AFLShowmapOrErr = sys::findProgramByName("afl-showmap");
-  if (const auto EC = AFLShowmapOrErr.getError()) return EC;
-
   // Create temporary output file
   SmallString<256> OutputPath;
   const auto EC = sys::fs::createTemporaryFile("showmap", "out", OutputPath);
@@ -132,7 +121,7 @@ ErrorOr<std::unique_ptr<MemoryBuffer>> GetAFLCoverage(const StringRef Seed) {
                                             "--",
                                             TargetProg};
   AFLShowmapArgs.append(TargetArgs.begin(), TargetArgs.end());
-  sys::ExecuteAndWait(*AFLShowmapOrErr, AFLShowmapArgs, /*env=*/None,
+  sys::ExecuteAndWait(AFLShowmapPath, AFLShowmapArgs, /*env=*/None,
                       /*redirects=*/{}, Timeout, MemLimit);
 
   // Read afl-showmap output
@@ -169,6 +158,10 @@ static inline void EndTimer(bool ShowProg) {
     outs() << Duration.count() << "s\n";
 }
 
+// -------------------------------------------------------------------------- //
+// Main function
+// -------------------------------------------------------------------------- //
+
 int main(int Argc, char *Argv[]) {
   SmallString<32> CorpusDir;
   bool            ShowProg = false;
@@ -178,12 +171,12 @@ int main(int Argc, char *Argv[]) {
   int             Opt;
   ProgressBar     Prog;
 
-  outs() << "afl-showmap corpus minimization\n\n";
+  outs() << "OptiMin corpus minimization\n\n";
 
   // ------------------------------------------------------------------------ //
   // Parse command-line options
   // ------------------------------------------------------------------------ //
- 
+
   while ((Opt = getopt(Argc, Argv, "+i:pm:t:ehw:")) > 0) {
     switch (Opt) {
       case 'i':
@@ -235,6 +228,14 @@ int main(int Argc, char *Argv[]) {
   for (unsigned I = optind + 1; optind < Argc; ++I)
     TargetArgs.push_back(Argv[I]);
 
+  // Find afl-showmap
+  const auto AFLShowmapOrErr = sys::findProgramByName("afl-showmap");
+  if (const auto EC = AFLShowmapOrErr.getError()) {
+    errs() << "[-] Failed to find afl-showmap. Check your PATH\n";
+    return 1;
+  }
+  AFLShowmapPath = *AFLShowmapOrErr;
+
   // ------------------------------------------------------------------------ //
   // Parse weights
   //
@@ -253,43 +254,72 @@ int main(int Argc, char *Argv[]) {
     EndTimer(ShowProg);
   }
 
+  // ------------------------------------------------------------------------ //
+  // Traverse corpus directory
+  //
+  // Find the seed files inside this directory.
+  // ------------------------------------------------------------------------ //
+
+  if (!ShowProg) outs() << "[*] Finding seeds in `" << CorpusDir << "`... ";
+  StartTimer(ShowProg);
+
+  std::vector<std::string> SeedFiles;
+  std::error_code          EC;
+  sys::fs::file_status     Status;
+
+  for (sys::fs::directory_iterator Dir(CorpusDir, EC), DirEnd;
+       Dir != DirEnd && !EC; Dir.increment(EC)) {
+    const auto &Path = Dir->path();
+    EC = sys::fs::status(Path, Status);
+    if (EC) {
+      errs() << "[-] Failed to read seed file `" << Path
+             << "`: " << EC.message() << '\n';
+      return 1;
+    }
+    switch (Status.type()) {
+      case sys::fs::file_type::regular_file:
+      case sys::fs::file_type::symlink_file:
+      case sys::fs::file_type::type_unknown:
+        SeedFiles.push_back(Path);
+      default:
+        /* Ignore */
+        break;
+    }
+    if (EC) {
+      errs() << "[-] Failed to traverse corpus directory `" << CorpusDir
+             << "`: " << EC.message() << '\n';
+      return 1;
+    }
+  }
+
+  EndTimer(ShowProg);
+
+  // ------------------------------------------------------------------------ //
+  // Generate seed coverage
+  //
+  // Iterate over the corpus directory, which should contain seed files. Execute
+  // these seeds in the target program to generate coverage information, and
+  // then store this coverage information in the appropriate data structures.
+  // ------------------------------------------------------------------------ //
+
+  size_t       SeedCount = 0;
+  const size_t NumSeeds = SeedFiles.size();
+
+  if (!ShowProg)
+    outs() << "[*] Generating coverage for " << NumSeeds << " seeds...\n";
+  StartTimer(ShowProg);
+
   std::unique_ptr<EvalMaxSAT> Solver =
       std::make_unique<EvalMaxSAT>(/*nbMinimizeThread=*/0);
-
-  // ------------------------------------------------------------------------ //
-  // Get seed coverage
-  //
-  // Iterate over the corpus directory, which should contain `afl-showmap`-style
-  // output files. Read each of these files and store them in the appropriate
-  // data structures.
-  // ------------------------------------------------------------------------ //
-
-  struct dirent *DP;
-  DIR *          DirFD;
 
   MaxSATSeeds       SeedLiterals;
   MaxSATCoverageMap SeedCoverage;
 
-  if (!ShowProg) outs() << "[*] Reading coverage in `" << CorpusDir << "`... ";
-  StartTimer(ShowProg);
-
-  if ((DirFD = opendir(CorpusDir.c_str())) == nullptr) {
-    errs() << "[-] Unable to open corpus directory\n";
-    return 1;
-  }
-
-  size_t       SeedCount = 0;
-  const size_t NumSeeds = GetNumSeeds(DirFD);
-
-  while ((DP = readdir(DirFD)) != nullptr) {
-    if (DP->d_type == DT_DIR) continue;
-
+  for (const auto &SeedFile : SeedFiles) {
     // Get seed coverage
-    SmallString<32> Seed{CorpusDir};
-    sys::path::append(Seed, DP->d_name);
-    auto CovOrErr = GetAFLCoverage(Seed);
+    auto CovOrErr = GetAFLCoverage(SeedFile);
     if (const auto EC = CovOrErr.getError()) {
-      errs() << "[-] Unable to get coverage for seed " << DP->d_name << ": "
+      errs() << "[-] Unable to get coverage for seed " << SeedFile << ": "
              << EC.message() << '\n';
       return 1;
     }
@@ -297,7 +327,7 @@ int main(int Argc, char *Argv[]) {
 
     // Create a literal to represent the seed
     const SeedID SeedLit = Solver->newVar();
-    SeedLiterals.push_back({SeedLit, DP->d_name});
+    SeedLiterals.push_back({SeedLit, SeedFile});
 
     // Record the set of seeds that cover a particular edge
     unsigned Edge = 0;
@@ -320,7 +350,6 @@ int main(int Argc, char *Argv[]) {
       Prog.Update(SeedCount * 100 / NumSeeds, "Reading seed coverage");
   }
 
-  closedir(DirFD);
   EndTimer(ShowProg);
 
   // ------------------------------------------------------------------------ //
