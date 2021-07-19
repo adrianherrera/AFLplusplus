@@ -133,7 +133,10 @@ static std::error_code getAFLCoverage(const StringRef    Seed,
 
   // Parse afl-showmap output
   const auto CovOrErr = MemoryBuffer::getFile(OutputPath);
-  if (const auto EC = CovOrErr.getError()) return EC;
+  if (const auto EC = CovOrErr.getError()) {
+    sys::fs::remove(OutputPath);
+    return EC;
+  }
 
   SmallVector<StringRef, 0> Lines;
   CovOrErr.get()->getBuffer().split(Lines, '\n');
@@ -149,7 +152,7 @@ static std::error_code getAFLCoverage(const StringRef    Seed,
     Cov.push_back({Tuple, Freq});
   }
 
-  return std::error_code();
+  return sys::fs::remove(OutputPath);
 }
 
 static void Usage(const char *Argv0) {
@@ -195,7 +198,7 @@ int main(int Argc, char *Argv[]) {
   int             Opt;
   ProgressBar     Prog;
 
-  outs() << "OptiMin corpus minimization\n\n";
+  outs() << "OptiMin corpus minimization\n";
 
   // ------------------------------------------------------------------------ //
   // Parse command-line options
@@ -411,15 +414,21 @@ int main(int Argc, char *Argv[]) {
   // Print out the solution
   // ------------------------------------------------------------------------ //
 
+  SmallVector<StringRef, 64> Solution;
+
   if (Solved) {
     for (const auto &[ID, Seed] : SeedLiterals) {
-      if (Solver.getValue(ID) > 0) outs() << Seed << '\n';
+      if (Solver.getValue(ID) > 0) Solution.push_back(Seed);
     }
   } else {
     errs() << "[-] Failed to find an optimal solution for " << CorpusDir
            << '\n';
     return 1;
   }
+
+  outs() << "min. corpus size: " << Solution.size() << '\n';
+  for (const auto &Seed : Solution)
+    outs() << "  " << Seed << '\n';
 
   return 0;
 }
