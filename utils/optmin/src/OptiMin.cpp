@@ -4,9 +4,7 @@
  * Author: Adrian Herrera
  */
 
-#include <chrono>
 #include <cstdint>
-#include <fstream>
 #include <vector>
 
 #include <llvm/ADT/DenseSet.h>
@@ -14,6 +12,7 @@
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/ADT/StringExtras.h>
 #include <llvm/ADT/StringMap.h>
+#include <llvm/Support/Chrono.h>
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/Path.h>
@@ -71,15 +70,15 @@ using MaxSATCoverageMap = DenseMap<AFLTupleID, MaxSATSeedSet>;
 // Global variables
 // -------------------------------------------------------------------------- //
 
-static std::chrono::time_point<std::chrono::steady_clock> StartTime, EndTime;
-static std::chrono::seconds                               Duration;
+static sys::TimePoint<>     StartTime, EndTime;
+static std::chrono::seconds Duration;
 
 static char *                    TargetProg;
 static SmallVector<StringRef, 8> TargetArgs;
 static std::string               AFLShowmapPath;
 
-static unsigned Timeout = 0;
-static unsigned MemLimit = 0;
+static std::string Timeout = "none";
+static std::string MemLimit = "none";
 
 // This is based on the human class count in `count_class_human[256]` in
 // `afl-showmap.c`
@@ -90,30 +89,37 @@ static constexpr uint32_t MAX_EDGE_FREQ = 8;
 // Helper functions
 // -------------------------------------------------------------------------- //
 
-void GetWeights(std::istream &IS, WeightsMap &Weights) {
-  std::string Line;
+static void GetWeights(const MemoryBuffer &MB, WeightsMap &Weights) {
+  SmallVector<StringRef, 0> Lines;
+  MB.getBuffer().split(Lines, '\n');
 
-  while (std::getline(IS, Line, '\n')) {
-    const size_t      DelimPos = Line.find(',');
-    const std::string Seed = Line.substr(0, DelimPos).c_str();
-    const unsigned    Weight = std::stoul(Line.substr(DelimPos + 1));
+  for (const auto &Line : Lines) {
+    const auto &[Seed, WeightStr] = Line.split(',');
 
-    Weights.try_emplace(Seed, Weight);
+    unsigned Weight;
+    if (to_integer(WeightStr, Weight, 10)) {
+      Weights.try_emplace(Seed, Weight);
+    } else {
+      errs() << "[-] Invalid weight for seed `" << Seed << "`. Skipping...\n";
+    }
   }
 }
 
-ErrorOr<std::unique_ptr<MemoryBuffer>> GetAFLCoverage(const StringRef Seed) {
+static ErrorOr<std::unique_ptr<MemoryBuffer>> GetAFLCoverage(
+    const StringRef Seed) {
   // Create temporary output file
   SmallString<256> OutputPath;
   const auto EC = sys::fs::createTemporaryFile("showmap", "out", OutputPath);
   if (EC) return EC;
 
   // Run afl-showmap
-  SmallVector<StringRef, 12> AFLShowmapArgs{"-m",
-                                            utostr(MemLimit),
+  SmallVector<StringRef, 12> AFLShowmapArgs{AFLShowmapPath,
+                                            "-m",
+                                            MemLimit,
                                             "-t",
-                                            utostr(Timeout),
+                                            Timeout,
                                             /* Binary mode */ "-b",
+                                            /* Quite mode */ "-q",
                                             "-A",
                                             Seed,
                                             "-o",
@@ -121,8 +127,7 @@ ErrorOr<std::unique_ptr<MemoryBuffer>> GetAFLCoverage(const StringRef Seed) {
                                             "--",
                                             TargetProg};
   AFLShowmapArgs.append(TargetArgs.begin(), TargetArgs.end());
-  sys::ExecuteAndWait(AFLShowmapPath, AFLShowmapArgs, /*env=*/None,
-                      /*redirects=*/{}, Timeout, MemLimit);
+  sys::ExecuteAndWait(AFLShowmapPath, AFLShowmapArgs);
 
   // Read afl-showmap output
   return MemoryBuffer::getFile(OutputPath);
@@ -144,11 +149,11 @@ static void Usage(const char *Argv0) {
 }
 
 static inline void StartTimer(bool ShowProg) {
-  StartTime = std::chrono::steady_clock::now();
+  StartTime = std::chrono::system_clock::now();
 }
 
 static inline void EndTimer(bool ShowProg) {
-  EndTime = std::chrono::steady_clock::now();
+  EndTime = std::chrono::system_clock::now();
   Duration =
       std::chrono::duration_cast<std::chrono::seconds>(EndTime - StartTime);
 
@@ -189,21 +194,11 @@ int main(int Argc, char *Argv[]) {
         break;
       case 'm':
         // Memory limit
-        if (strcmp(optarg, "none")) {
-          if (!to_integer(optarg, MemLimit, 10)) {
-            errs() << "[-] Invalid memory limit: " << optarg << '\n';
-            return 1;
-          }
-        }
+        MemLimit = optarg;
         break;
       case 't':
         // Timeout
-        if (strcmp(optarg, "none")) {
-          if (!to_integer(optarg, Timeout, 10)) {
-            errs() << "[-] Invalid timeout: " << optarg << '\n';
-            return 1;
-          }
-        }
+        Timeout = optarg;
         break;
       case 'e':
         // Solve for edge coverage only (not frequency of edge coverage)
@@ -225,7 +220,7 @@ int main(int Argc, char *Argv[]) {
   if (optind == Argc || CorpusDir == "") Usage(Argv[0]);
 
   TargetProg = Argv[optind];
-  for (unsigned I = optind + 1; optind < Argc; ++I)
+  for (unsigned I = optind + 1; I < Argc; ++I)
     TargetArgs.push_back(Argv[I]);
 
   // Find afl-showmap
@@ -247,9 +242,15 @@ int main(int Argc, char *Argv[]) {
     outs() << "[*] Reading weights from `" << WeightsFile << "`... ";
     StartTimer(ShowProg);
 
-    std::ifstream IFS(WeightsFile);
-    GetWeights(IFS, Weights);
-    IFS.close();
+    const auto WeightsOrErr =
+        MemoryBuffer::getFile(WeightsFile, /*IsText=*/true);
+    if (const auto EC = WeightsOrErr.getError()) {
+      errs() << "[-] Unable to read weights from `" << WeightsFile
+             << "`: " << EC.message() << '\n';
+      return 1;
+    }
+
+    GetWeights(*WeightsOrErr.get(), Weights);
 
     EndTimer(ShowProg);
   }
@@ -306,7 +307,7 @@ int main(int Argc, char *Argv[]) {
   const size_t NumSeeds = SeedFiles.size();
 
   if (!ShowProg)
-    outs() << "[*] Generating coverage for " << NumSeeds << " seeds...\n";
+    outs() << "[*] Generating coverage for " << NumSeeds << " seeds...";
   StartTimer(ShowProg);
 
   std::unique_ptr<EvalMaxSAT> Solver =
@@ -347,7 +348,7 @@ int main(int Argc, char *Argv[]) {
     }
 
     if ((++SeedCount % 10 == 0) && ShowProg)
-      Prog.Update(SeedCount * 100 / NumSeeds, "Reading seed coverage");
+      Prog.Update(SeedCount * 100 / NumSeeds, "Generating seed coverage");
   }
 
   EndTimer(ShowProg);
