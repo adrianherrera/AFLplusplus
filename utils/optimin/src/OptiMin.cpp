@@ -141,15 +141,15 @@ static std::error_code getAFLCoverage(const StringRef    Seed,
   SmallVector<StringRef, 0> Lines;
   CovOrErr.get()->getBuffer().split(Lines, '\n');
 
-  AFLTupleID Tuple = 0;
+  AFLTupleID Edge = 0;
   unsigned   Freq = 0;
 
   for (const auto &Line : Lines) {
-    const auto &[TupleStr, FreqStr] = Line.split(':');
+    const auto &[EdgeStr, FreqStr] = Line.split(':');
 
-    to_integer(TupleStr, Tuple, 10);
+    to_integer(EdgeStr, Edge, 10);
     to_integer(FreqStr, Freq, 10);
-    Cov.push_back({Tuple, Freq});
+    Cov.push_back({Edge, Freq});
   }
 
   return sys::fs::remove(OutputPath);
@@ -223,7 +223,8 @@ int main(int Argc, char *Argv[]) {
         Timeout = optarg;
         break;
       case 'f':
-        // Take into account frequency of edge coverage when minimizing
+        // Take into account edge frequency (i.e., number of times each edge was
+        // executed) when minimizing
         EdgesOnly = false;
         break;
       case 'h':
@@ -294,9 +295,9 @@ int main(int Argc, char *Argv[]) {
     const auto &Path = Dir->path();
     EC = sys::fs::status(Path, Status);
     if (EC) {
-      errs() << "[-] Failed to read seed file `" << Path
-             << "`: " << EC.message() << '\n';
-      return 1;
+      errs() << "[-] Failed to access seed file `" << Path
+             << "`: " << EC.message() << ". Skipping...\n";
+      continue;
     }
     switch (Status.type()) {
       case sys::fs::file_type::regular_file:
@@ -328,7 +329,7 @@ int main(int Argc, char *Argv[]) {
   const size_t NumSeeds = SeedFiles.size();
 
   if (!ShowProg)
-    outs() << "[*] Generating coverage for " << NumSeeds << " seeds...";
+    outs() << "[*] Generating coverage for " << NumSeeds << " seeds... ";
   StartTimer(ShowProg);
 
   EvalMaxSAT        Solver(/*nbMinimizeThread=*/0);
@@ -417,9 +418,8 @@ int main(int Argc, char *Argv[]) {
   SmallVector<StringRef, 64> Solution;
 
   if (Solved) {
-    for (const auto &[ID, Seed] : SeedLiterals) {
+    for (const auto &[ID, Seed] : SeedLiterals)
       if (Solver.getValue(ID) > 0) Solution.push_back(Seed);
-    }
   } else {
     errs() << "[-] Failed to find an optimal solution for " << CorpusDir
            << '\n';
