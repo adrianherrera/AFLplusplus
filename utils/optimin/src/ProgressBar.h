@@ -6,7 +6,8 @@
 
 #pragma once
 
-#include <iostream>
+#include <llvm/ADT/StringRef.h>
+#include <llvm/Support/raw_ostream.h>
 
 /// Display a progress bar in the terminal
 class ProgressBar {
@@ -19,17 +20,18 @@ class ProgressBar {
   ProgressBar() : ProgressBar(60, "#", " ") {
   }
 
-  ProgressBar(size_t Width, const std::string &F, const std::string &R)
+  ProgressBar(size_t Width, const llvm::StringRef F, const llvm::StringRef R)
       : BarWidth(Width), Fill(F), Remainder(R) {
   }
 
-  void Update(float Progress, const std::string Status = "",
-              std::ostream &OS = std::cout) {
+  void Update(float Progress, const llvm::StringRef Status = "",
+              llvm::raw_ostream &OS = llvm::outs()) {
     // No need to write once progress is 100%
     if (Progress > 100.0f) { return; }
 
     // Move cursor to the first position on the same line and flush
-    OS << '\r' << std::flush;
+    OS << '\r';
+    OS.flush();
 
     // Start bar
     OS << '[';
