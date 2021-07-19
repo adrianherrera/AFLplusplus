@@ -8,5 +8,5 @@
 	path = qemu_mode/qemuafl
 	url = https://github.com/AFLplusplus/qemuafl
 [submodule "utils/optmin/EvalMaxSAT"]
-	path = utils/optmin/EvalMaxSAT
+	path = utils/optimin/EvalMaxSAT
 	url = https://github.com/FlorentAvellaneda/EvalMaxSAT
