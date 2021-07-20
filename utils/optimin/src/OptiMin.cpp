@@ -81,6 +81,7 @@ static std::chrono::seconds Duration;
 
 static char *                    TargetProg;
 static SmallVector<StringRef, 8> TargetArgs;
+bool                             TargetArgsHasAtAt = false;
 static std::string               AFLShowmapPath;
 
 static std::string Timeout = "none";
@@ -110,26 +111,28 @@ static void GetWeights(const MemoryBuffer &MB, WeightsMap &Weights) {
 
 static std::error_code getAFLCoverage(const StringRef    Seed,
                                       AFLCoverageVector &Cov) {
+  Optional<StringRef> Redirects[] = {None, None, None};
+
   // Create temporary output file
   SmallString<64> OutputPath;
   const auto EC = sys::fs::createTemporaryFile("showmap", "txt", OutputPath);
   if (EC) return EC;
 
-  // Run afl-showmap
-  SmallVector<StringRef, 12> AFLShowmapArgs{AFLShowmapPath,
-                                            "-m",
-                                            MemLimit,
-                                            "-t",
-                                            Timeout,
-                                            /* Quiet mode */ "-q",
-                                            "-A",
-                                            Seed,
-                                            "-o",
-                                            OutputPath,
-                                            "--",
-                                            TargetProg};
+  // Prepare afl-showmap arguments
+  SmallVector<StringRef, 12> AFLShowmapArgs{
+      AFLShowmapPath,        "-m", MemLimit,  "-t", Timeout,
+      /* Quiet mode */ "-q", "-o", OutputPath};
+
+  if (TargetArgsHasAtAt)
+    AFLShowmapArgs.append({"-A", Seed});
+  else
+    Redirects[/* stdin */ 0] = Seed;
+
+  AFLShowmapArgs.append({"--", TargetProg});
   AFLShowmapArgs.append(TargetArgs.begin(), TargetArgs.end());
-  sys::ExecuteAndWait(AFLShowmapPath, AFLShowmapArgs);
+
+  // Run afl-showmap
+  sys::ExecuteAndWait(AFLShowmapPath, AFLShowmapArgs, /*env=*/None, Redirects);
 
   // Parse afl-showmap output
   const auto CovOrErr = MemoryBuffer::getFile(OutputPath);
@@ -159,6 +162,7 @@ static void Usage(const char *Argv0) {
   errs() << '\n' << Argv0 << " [ options ] -- /path/to/target_app [...]\n\n";
   errs() << "Required parameters:\n\n";
   errs() << "  -i dir     - Corpus directory\n";
+  errs() << "  -o dir     - Output directory\n\n";
   errs() << "Optional parameters:\n\n";
   errs() << "  -p         - Show progress bar\n";
   errs() << "  -m megs    - Memory limit for child process (0 MB)\n";
@@ -190,25 +194,28 @@ static inline void EndTimer(bool ShowProg) {
 // -------------------------------------------------------------------------- //
 
 int main(int Argc, char *Argv[]) {
-  SmallString<32> CorpusDir;
-  bool            ShowProg = false;
-  bool            EdgesOnly = true;
-  std::string     WeightsFile;
-  WeightsMap      Weights;
-  int             Opt;
-  ProgressBar     Prog;
+  StringRef   CorpusDir, OutputDir, WeightsFile;
+  bool        ShowProg = false;
+  bool        EdgesOnly = true;
+  WeightsMap  Weights;
+  int         Opt;
+  ProgressBar Prog;
 
-  outs() << "OptiMin corpus minimization\n";
+  outs() << "OptiMin corpus minimization\n\n";
 
   // ------------------------------------------------------------------------ //
   // Parse command-line options
   // ------------------------------------------------------------------------ //
 
-  while ((Opt = getopt(Argc, Argv, "+i:pm:t:fhw:")) > 0) {
+  while ((Opt = getopt(Argc, Argv, "+i:o:pm:t:fhw:")) > 0) {
     switch (Opt) {
       case 'i':
         // Input directory
         CorpusDir = optarg;
+        break;
+      case 'o':
+        // Output directory
+        OutputDir = optarg;
         break;
       case 'p':
         // Show progres bar
@@ -240,11 +247,17 @@ int main(int Argc, char *Argv[]) {
     }
   }
 
-  if (optind == Argc || CorpusDir == "") Usage(Argv[0]);
+  if (optind == Argc || CorpusDir == "" || OutputDir == "") Usage(Argv[0]);
+  if (!sys::fs::is_directory(OutputDir)) {
+    errs() << "[-] Invalid output directory `" << OutputDir << "`\n";
+    return 1;
+  }
 
   TargetProg = Argv[optind];
-  for (unsigned I = optind + 1; I < Argc; ++I)
+  for (unsigned I = optind + 1; I < Argc; ++I) {
+    if (!strcmp(Argv[I], "@@")) TargetArgsHasAtAt = true;
     TargetArgs.push_back(Argv[I]);
+  }
 
   // Find afl-showmap
   const auto AFLShowmapOrErr = sys::findProgramByName("afl-showmap");
@@ -261,7 +274,7 @@ int main(int Argc, char *Argv[]) {
   // greater than zero.
   // ------------------------------------------------------------------------ //
 
-  if (!WeightsFile.empty()) {
+  if (WeightsFile != "") {
     outs() << "[*] Reading weights from `" << WeightsFile << "`... ";
     StartTimer(ShowProg);
 
@@ -283,7 +296,7 @@ int main(int Argc, char *Argv[]) {
   // Find the seed files inside this directory.
   // ------------------------------------------------------------------------ //
 
-  if (!ShowProg) outs() << "[*] Finding seeds in `" << CorpusDir << "`... ";
+  if (!ShowProg) outs() << "[*] Locating seeds in `" << CorpusDir << "`... ";
   StartTimer(ShowProg);
 
   std::vector<std::string> SeedFiles;
@@ -404,31 +417,51 @@ int main(int Argc, char *Argv[]) {
   // Generate a solution
   // ------------------------------------------------------------------------ //
 
-  if (!ShowProg) outs() << "[*] Solving...";
+  outs() << "[*] Solving... ";
   StartTimer(ShowProg);
 
   const bool Solved = Solver.solve();
 
-  EndTimer(ShowProg);
+  EndTimer(/*ShowProg=*/false);
 
   // ------------------------------------------------------------------------ //
   // Print out the solution
   // ------------------------------------------------------------------------ //
 
   SmallVector<StringRef, 64> Solution;
+  SmallString<32>            OutputSeed;
 
   if (Solved) {
     for (const auto &[ID, Seed] : SeedLiterals)
       if (Solver.getValue(ID) > 0) Solution.push_back(Seed);
   } else {
-    errs() << "[-] Failed to find an optimal solution for " << CorpusDir
-           << '\n';
+    errs() << "[-] Failed to find an optimal solution for `" << CorpusDir
+           << "`\n";
     return 1;
   }
 
-  outs() << "min. corpus size: " << Solution.size() << '\n';
-  for (const auto &Seed : Solution)
-    outs() << "  " << Seed << '\n';
+  outs() << "[+] Minimized corpus size: " << Solution.size() << " seeds\n";
+
+  if (!ShowProg) outs() << "[*] Copying to `" << OutputDir << "`... ";
+  StartTimer(ShowProg);
+
+  SeedCount = 0;
+
+  for (const auto &Seed : Solution) {
+    OutputSeed = OutputDir;
+    sys::path::append(OutputSeed, sys::path::filename(Seed));
+
+    if (const auto EC = sys::fs::copy_file(Seed, OutputSeed)) {
+      errs() << "[-] Failed to copy `" << Seed << "` to `" << OutputDir
+             << "`\n";
+    }
+
+    if ((++SeedCount % 10 == 0) && ShowProg)
+      Prog.Update(SeedCount * 100 / Solution.size(), "Copying seeds");
+  }
+
+  EndTimer(ShowProg);
+  outs() << "[+] Done!\n";
 
   return 0;
 }
