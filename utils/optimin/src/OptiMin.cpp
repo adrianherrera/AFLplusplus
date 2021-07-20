@@ -121,8 +121,7 @@ static std::error_code getAFLCoverage(const StringRef    Seed,
 
   // Prepare afl-showmap arguments
   SmallVector<StringRef, 12> AFLShowmapArgs{
-      AFLShowmapPath,        "-m", MemLimit,  "-t", Timeout,
-      /* Quiet mode */ "-q", "-o", OutputPath};
+      AFLShowmapPath, "-m", MemLimit, "-t", Timeout, "-q", "-o", OutputPath};
 
   if (TargetArgsHasAtAt)
     AFLShowmapArgs.append({"-A", Seed});
@@ -175,16 +174,16 @@ static void Usage(const char *Argv0) {
   std::exit(1);
 }
 
-static inline void StartTimer(bool ShowProg) {
+static inline void StartTimer(bool ShowProgBar) {
   StartTime = std::chrono::system_clock::now();
 }
 
-static inline void EndTimer(bool ShowProg) {
+static inline void EndTimer(bool ShowProgBar) {
   EndTime = std::chrono::system_clock::now();
   Duration =
       std::chrono::duration_cast<std::chrono::seconds>(EndTime - StartTime);
 
-  if (ShowProg)
+  if (ShowProgBar)
     outs() << '\n';
   else
     outs() << Duration.count() << "s\n";
@@ -196,11 +195,11 @@ static inline void EndTimer(bool ShowProg) {
 
 int main(int Argc, char *Argv[]) {
   StringRef   CorpusDir, OutputDir, WeightsFile;
-  bool        ShowProg = false;
+  bool        ShowProgBar = false;
   bool        EdgesOnly = true;
   WeightsMap  Weights;
   int         Opt;
-  ProgressBar Prog;
+  ProgressBar ProgBar;
 
   const auto ErrMsg = []() {
     return WithColor(errs(), HighlightColor::Error) << "[-] ";
@@ -231,7 +230,7 @@ int main(int Argc, char *Argv[]) {
         break;
       case 'p':
         // Show progres bar
-        ShowProg = true;
+        ShowProgBar = true;
         break;
       case 'm':
         // Memory limit
@@ -288,7 +287,7 @@ int main(int Argc, char *Argv[]) {
 
   if (WeightsFile != "") {
     StatMsg() << "Reading weights from `" << WeightsFile << "`... ";
-    StartTimer(ShowProg);
+    StartTimer(ShowProgBar);
 
     const auto WeightsOrErr = MemoryBuffer::getFile(WeightsFile);
     if (const auto EC = WeightsOrErr.getError()) {
@@ -299,7 +298,7 @@ int main(int Argc, char *Argv[]) {
 
     GetWeights(*WeightsOrErr.get(), Weights);
 
-    EndTimer(ShowProg);
+    EndTimer(ShowProgBar);
   }
 
   // ------------------------------------------------------------------------ //
@@ -308,8 +307,8 @@ int main(int Argc, char *Argv[]) {
   // Find the seed files inside this directory.
   // ------------------------------------------------------------------------ //
 
-  if (!ShowProg) StatMsg() << "Locating seeds in `" << CorpusDir << "`... ";
-  StartTimer(ShowProg);
+  if (!ShowProgBar) StatMsg() << "Locating seeds in `" << CorpusDir << "`... ";
+  StartTimer(ShowProgBar);
 
   std::vector<std::string> SeedFiles;
   std::error_code          EC;
@@ -340,7 +339,7 @@ int main(int Argc, char *Argv[]) {
     }
   }
 
-  EndTimer(ShowProg);
+  EndTimer(ShowProgBar);
 
   // ------------------------------------------------------------------------ //
   // Generate seed coverage
@@ -353,9 +352,9 @@ int main(int Argc, char *Argv[]) {
   size_t       SeedCount = 0;
   const size_t NumSeeds = SeedFiles.size();
 
-  if (!ShowProg)
+  if (!ShowProgBar)
     StatMsg() << "Generating coverage for " << NumSeeds << " seeds... ";
-  StartTimer(ShowProg);
+  StartTimer(ShowProgBar);
 
   EvalMaxSAT        Solver(/*nbMinimizeThread=*/0);
   MaxSATSeeds       SeedLiterals;
@@ -387,18 +386,18 @@ int main(int Argc, char *Argv[]) {
       }
     }
 
-    if ((++SeedCount % 10 == 0) && ShowProg)
-      Prog.Update(SeedCount * 100 / NumSeeds, "Generating seed coverage");
+    if ((++SeedCount % 10 == 0) && ShowProgBar)
+      ProgBar.update(SeedCount * 100 / NumSeeds, "Generating seed coverage");
   }
 
-  EndTimer(ShowProg);
+  EndTimer(ShowProgBar);
 
   // ------------------------------------------------------------------------ //
   // Set the hard and soft constraints in the solver
   // ------------------------------------------------------------------------ //
 
-  if (!ShowProg) StatMsg() << "Generating constraints... ";
-  StartTimer(ShowProg);
+  if (!ShowProgBar) StatMsg() << "Generating constraints... ";
+  StartTimer(ShowProgBar);
 
   SeedCount = 0;
 
@@ -414,8 +413,9 @@ int main(int Argc, char *Argv[]) {
 
     Solver.addClause(Clauses);
 
-    if ((++SeedCount % 10 == 0) && ShowProg)
-      Prog.Update(SeedCount * 100 / SeedCoverage.size(), "Generating clauses");
+    if ((++SeedCount % 10 == 0) && ShowProgBar)
+      ProgBar.update(SeedCount * 100 / SeedCoverage.size(),
+                     "Generating clauses");
   }
 
   // Select the minimum number of seeds that cover a particular set of edges
@@ -423,18 +423,18 @@ int main(int Argc, char *Argv[]) {
   for (const auto &[Literal, Seed] : SeedLiterals)
     Solver.addWeightedClause({-Literal}, Weights[Seed]);
 
-  EndTimer(ShowProg);
+  EndTimer(ShowProgBar);
 
   // ------------------------------------------------------------------------ //
   // Generate a solution
   // ------------------------------------------------------------------------ //
 
   StatMsg() << "Solving... ";
-  StartTimer(ShowProg);
+  StartTimer(ShowProgBar);
 
   const bool Solved = Solver.solve();
 
-  EndTimer(/*ShowProg=*/false);
+  EndTimer(/*ShowProgBar=*/false);
 
   // ------------------------------------------------------------------------ //
   // Print out the solution
@@ -454,8 +454,8 @@ int main(int Argc, char *Argv[]) {
 
   SuccMsg() << "Minimized corpus size: " << Solution.size() << " seeds\n";
 
-  if (!ShowProg) StatMsg() << "Copying to `" << OutputDir << "`... ";
-  StartTimer(ShowProg);
+  if (!ShowProgBar) StatMsg() << "Copying to `" << OutputDir << "`... ";
+  StartTimer(ShowProgBar);
 
   SeedCount = 0;
 
@@ -467,11 +467,11 @@ int main(int Argc, char *Argv[]) {
       WarnMsg() << "Failed to copy `" << Seed << "` to `" << OutputDir << "`\n";
     }
 
-    if ((++SeedCount % 10 == 0) && ShowProg)
-      Prog.Update(SeedCount * 100 / Solution.size(), "Copying seeds");
+    if ((++SeedCount % 10 == 0) && ShowProgBar)
+      ProgBar.update(SeedCount * 100 / Solution.size(), "Copying seeds");
   }
 
-  EndTimer(ShowProg);
+  EndTimer(ShowProgBar);
   SuccMsg() << "Done!\n";
 
   return 0;

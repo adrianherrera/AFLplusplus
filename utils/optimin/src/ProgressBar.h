@@ -24,7 +24,7 @@ class ProgressBar {
       : BarWidth(Width), Fill(F), Remainder(R) {
   }
 
-  void Update(float Progress, const llvm::StringRef Status = "",
+  void update(float Progress, const llvm::StringRef Status = "",
               llvm::raw_ostream &OS = llvm::outs()) {
     // No need to write once progress is 100%
     if (Progress > 100.0f) { return; }
