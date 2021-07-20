@@ -13,6 +13,7 @@
 #include <llvm/ADT/StringExtras.h>
 #include <llvm/ADT/StringMap.h>
 #include <llvm/Support/Chrono.h>
+#include <llvm/Support/CommandLine.h>
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/Path.h>
@@ -77,20 +78,36 @@ using MaxSATCoverageMap = DenseMap<AFLTupleID, MaxSATSeedSet>;
 // Global variables
 // -------------------------------------------------------------------------- //
 
-static sys::TimePoint<>     StartTime, EndTime;
-static std::chrono::seconds Duration;
-
-static char *                    TargetProg;
-static SmallVector<StringRef, 8> TargetArgs;
-bool                             TargetArgsHasAtAt = false;
-static std::string               AFLShowmapPath;
-
-static std::string Timeout = "none";
-static std::string MemLimit = "none";
-
 // This is based on the human class count in `count_class_human[256]` in
 // `afl-showmap.c`
 static constexpr uint32_t MAX_EDGE_FREQ = 8;
+
+static sys::TimePoint<>     StartTime, EndTime;
+static std::chrono::seconds Duration;
+
+bool               TargetArgsHasAtAt = false;
+static std::string AFLShowmapPath;
+
+static cl::opt<std::string>  CorpusDir("i", cl::desc("Input directory"),
+                                      cl::value_desc("dir"), cl::Required);
+static cl::opt<std::string>  OutputDir("o", cl::desc("Output directory"),
+                                      cl::value_desc("dir"), cl::Required);
+static cl::opt<bool>         EdgesOnly("f", cl::desc("Include edge hit counts"),
+                               cl::init(true));
+static cl::opt<bool>         ShowProgBar("p", cl::desc("Display progress bar"));
+static cl::opt<std::string>  WeightsFile("w", cl::desc("Weights file"),
+                                        cl::value_desc("csv"));
+static cl::opt<std::string>  TargetProg(cl::Positional,
+                                       cl::desc("<target program>"),
+                                       cl::Required);
+static cl::list<std::string> TargetArgs(cl::ConsumeAfter,
+                                        cl::desc("[target args...]"));
+static cl::opt<std::string>  MemLimit(
+    "m", cl::desc("Memory limit for child process (default=none)"),
+    cl::value_desc("megs"), cl::init("none"));
+static cl::opt<std::string> Timeout(
+    "t", cl::desc("Run time limit for child process (default=none)"),
+    cl::value_desc("msec"), cl::init("none"));
 }  // anonymous namespace
 
 // -------------------------------------------------------------------------- //
@@ -158,22 +175,6 @@ static std::error_code getAFLCoverage(const StringRef    Seed,
   return sys::fs::remove(OutputPath);
 }
 
-static void Usage(const char *Argv0) {
-  errs() << '\n' << Argv0 << " [ options ] -- /path/to/target_app [...]\n\n";
-  errs() << "Required parameters:\n\n";
-  errs() << "  -i dir     - Corpus directory\n";
-  errs() << "  -o dir     - Output directory\n\n";
-  errs() << "Optional parameters:\n\n";
-  errs() << "  -p         - Show progress bar\n";
-  errs() << "  -m megs    - Memory limit for child process (0 MB)\n";
-  errs() << "  -t msec    - Timeout for each seed run (none)\n";
-  errs() << "  -e         - Use edge coverage only, ignore hit counts\n";
-  errs() << "  -h         - Print this message\n";
-  errs() << "  -w weights - CSV containing seed weights (see README)\n\n";
-
-  std::exit(1);
-}
-
 static inline void StartTimer(bool ShowProgBar) {
   StartTime = std::chrono::system_clock::now();
 }
@@ -193,12 +194,8 @@ static inline void EndTimer(bool ShowProgBar) {
 // Main function
 // -------------------------------------------------------------------------- //
 
-int main(int Argc, char *Argv[]) {
-  StringRef   CorpusDir, OutputDir, WeightsFile;
-  bool        ShowProgBar = false;
-  bool        EdgesOnly = true;
+int main(int argc, char *argv[]) {
   WeightsMap  Weights;
-  int         Opt;
   ProgressBar ProgBar;
 
   const auto ErrMsg = []() {
@@ -216,61 +213,24 @@ int main(int Argc, char *Argv[]) {
 
   // ------------------------------------------------------------------------ //
   // Parse command-line options
+  //
+  // Also check the target arguments, as this determines how we run afl-showmap.
   // ------------------------------------------------------------------------ //
 
-  while ((Opt = getopt(Argc, Argv, "+i:o:pm:t:fhw:")) > 0) {
-    switch (Opt) {
-      case 'i':
-        // Input directory
-        CorpusDir = optarg;
-        break;
-      case 'o':
-        // Output directory
-        OutputDir = optarg;
-        break;
-      case 'p':
-        // Show progres bar
-        ShowProgBar = true;
-        break;
-      case 'm':
-        // Memory limit
-        MemLimit = optarg;
-        break;
-      case 't':
-        // Timeout
-        Timeout = optarg;
-        break;
-      case 'f':
-        // Take into account edge frequency (i.e., number of times each edge was
-        // executed) when minimizing
-        EdgesOnly = false;
-        break;
-      case 'h':
-        // Help
-        Usage(Argv[0]);
-        break;
-      case 'w':
-        // Weights file
-        WeightsFile = optarg;
-        break;
-      default:
-        Usage(Argv[0]);
-    }
-  }
+  cl::ParseCommandLineOptions(argc, argv, "Optimal corpus minimizer");
 
-  if (optind == Argc || CorpusDir == "" || OutputDir == "") Usage(Argv[0]);
   if (!sys::fs::is_directory(OutputDir)) {
     ErrMsg() << "Invalid output directory `" << OutputDir << "`\n";
     return 1;
   }
 
-  TargetProg = Argv[optind];
-  for (unsigned I = optind + 1; I < Argc; ++I) {
-    if (!strcmp(Argv[I], "@@")) TargetArgsHasAtAt = true;
-    TargetArgs.push_back(Argv[I]);
-  }
+  for (const auto &Arg : TargetArgs)
+    if (Arg == "@@") TargetArgsHasAtAt = true;
 
+  // ------------------------------------------------------------------------ //
   // Find afl-showmap
+  // ------------------------------------------------------------------------ //
+
   const auto AFLShowmapOrErr = sys::findProgramByName("afl-showmap");
   if (const auto EC = AFLShowmapOrErr.getError()) {
     ErrMsg() << "Failed to find afl-showmap. Check your PATH\n";
