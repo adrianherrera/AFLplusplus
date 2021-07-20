@@ -17,6 +17,7 @@
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/Path.h>
 #include <llvm/Support/Program.h>
+#include <llvm/Support/WithColor.h>
 
 #include "EvalMaxSAT.h"
 #include "ProgressBar.h"
@@ -201,7 +202,18 @@ int main(int Argc, char *Argv[]) {
   int         Opt;
   ProgressBar Prog;
 
-  outs() << "OptiMin corpus minimization\n\n";
+  const auto ErrMsg = []() {
+    return WithColor(errs(), HighlightColor::Error) << "[-] ";
+  };
+  const auto WarnMsg = []() {
+    return WithColor(errs(), HighlightColor::Warning) << "[-] ";
+  };
+  const auto SuccMsg = []() {
+    return WithColor(outs(), HighlightColor::String) << "[+] ";
+  };
+  const auto StatMsg = []() {
+    return WithColor(outs(), HighlightColor::Remark) << "[*] ";
+  };
 
   // ------------------------------------------------------------------------ //
   // Parse command-line options
@@ -249,7 +261,7 @@ int main(int Argc, char *Argv[]) {
 
   if (optind == Argc || CorpusDir == "" || OutputDir == "") Usage(Argv[0]);
   if (!sys::fs::is_directory(OutputDir)) {
-    errs() << "[-] Invalid output directory `" << OutputDir << "`\n";
+    ErrMsg() << "Invalid output directory `" << OutputDir << "`\n";
     return 1;
   }
 
@@ -262,7 +274,7 @@ int main(int Argc, char *Argv[]) {
   // Find afl-showmap
   const auto AFLShowmapOrErr = sys::findProgramByName("afl-showmap");
   if (const auto EC = AFLShowmapOrErr.getError()) {
-    errs() << "[-] Failed to find afl-showmap. Check your PATH\n";
+    ErrMsg() << "Failed to find afl-showmap. Check your PATH\n";
     return 1;
   }
   AFLShowmapPath = *AFLShowmapOrErr;
@@ -275,13 +287,13 @@ int main(int Argc, char *Argv[]) {
   // ------------------------------------------------------------------------ //
 
   if (WeightsFile != "") {
-    outs() << "[*] Reading weights from `" << WeightsFile << "`... ";
+    StatMsg() << "Reading weights from `" << WeightsFile << "`... ";
     StartTimer(ShowProg);
 
     const auto WeightsOrErr = MemoryBuffer::getFile(WeightsFile);
     if (const auto EC = WeightsOrErr.getError()) {
-      errs() << "[-] Failed to read weights from `" << WeightsFile
-             << "`: " << EC.message() << '\n';
+      ErrMsg() << "Failed to read weights from `" << WeightsFile
+               << "`: " << EC.message() << '\n';
       return 1;
     }
 
@@ -296,7 +308,7 @@ int main(int Argc, char *Argv[]) {
   // Find the seed files inside this directory.
   // ------------------------------------------------------------------------ //
 
-  if (!ShowProg) outs() << "[*] Locating seeds in `" << CorpusDir << "`... ";
+  if (!ShowProg) StatMsg() << "Locating seeds in `" << CorpusDir << "`... ";
   StartTimer(ShowProg);
 
   std::vector<std::string> SeedFiles;
@@ -308,8 +320,8 @@ int main(int Argc, char *Argv[]) {
     const auto &Path = Dir->path();
     EC = sys::fs::status(Path, Status);
     if (EC) {
-      errs() << "[-] Failed to access seed file `" << Path
-             << "`: " << EC.message() << ". Skipping...\n";
+      WarnMsg() << "Failed to access seed file `" << Path
+                << "`: " << EC.message() << ". Skipping...\n";
       continue;
     }
     switch (Status.type()) {
@@ -322,8 +334,8 @@ int main(int Argc, char *Argv[]) {
         break;
     }
     if (EC) {
-      errs() << "[-] Failed to traverse corpus directory `" << CorpusDir
-             << "`: " << EC.message() << '\n';
+      ErrMsg() << "Failed to traverse corpus directory `" << CorpusDir
+               << "`: " << EC.message() << '\n';
       return 1;
     }
   }
@@ -342,7 +354,7 @@ int main(int Argc, char *Argv[]) {
   const size_t NumSeeds = SeedFiles.size();
 
   if (!ShowProg)
-    outs() << "[*] Generating coverage for " << NumSeeds << " seeds... ";
+    StatMsg() << "Generating coverage for " << NumSeeds << " seeds... ";
   StartTimer(ShowProg);
 
   EvalMaxSAT        Solver(/*nbMinimizeThread=*/0);
@@ -354,8 +366,8 @@ int main(int Argc, char *Argv[]) {
     // Execute seed
     Cov.clear();
     if (getAFLCoverage(SeedFile, Cov)) {
-      errs() << "[-] Failed to get coverage for seed " << SeedFile << ": "
-             << EC.message() << '\n';
+      ErrMsg() << "Failed to get coverage for seed " << SeedFile << ": "
+               << EC.message() << '\n';
       return 1;
     }
 
@@ -385,7 +397,7 @@ int main(int Argc, char *Argv[]) {
   // Set the hard and soft constraints in the solver
   // ------------------------------------------------------------------------ //
 
-  if (!ShowProg) outs() << "[*] Generating constraints... ";
+  if (!ShowProg) StatMsg() << "Generating constraints... ";
   StartTimer(ShowProg);
 
   SeedCount = 0;
@@ -417,7 +429,7 @@ int main(int Argc, char *Argv[]) {
   // Generate a solution
   // ------------------------------------------------------------------------ //
 
-  outs() << "[*] Solving... ";
+  StatMsg() << "Solving... ";
   StartTimer(ShowProg);
 
   const bool Solved = Solver.solve();
@@ -435,14 +447,14 @@ int main(int Argc, char *Argv[]) {
     for (const auto &[ID, Seed] : SeedLiterals)
       if (Solver.getValue(ID) > 0) Solution.push_back(Seed);
   } else {
-    errs() << "[-] Failed to find an optimal solution for `" << CorpusDir
-           << "`\n";
+    ErrMsg() << "Failed to find an optimal solution for `" << CorpusDir
+             << "`\n";
     return 1;
   }
 
-  outs() << "[+] Minimized corpus size: " << Solution.size() << " seeds\n";
+  SuccMsg() << "Minimized corpus size: " << Solution.size() << " seeds\n";
 
-  if (!ShowProg) outs() << "[*] Copying to `" << OutputDir << "`... ";
+  if (!ShowProg) StatMsg() << "Copying to `" << OutputDir << "`... ";
   StartTimer(ShowProg);
 
   SeedCount = 0;
@@ -452,8 +464,7 @@ int main(int Argc, char *Argv[]) {
     sys::path::append(OutputSeed, sys::path::filename(Seed));
 
     if (const auto EC = sys::fs::copy_file(Seed, OutputSeed)) {
-      errs() << "[-] Failed to copy `" << Seed << "` to `" << OutputDir
-             << "`\n";
+      WarnMsg() << "Failed to copy `" << Seed << "` to `" << OutputDir << "`\n";
     }
 
     if ((++SeedCount % 10 == 0) && ShowProg)
@@ -461,7 +472,7 @@ int main(int Argc, char *Argv[]) {
   }
 
   EndTimer(ShowProg);
-  outs() << "[+] Done!\n";
+  SuccMsg() << "Done!\n";
 
   return 0;
 }
