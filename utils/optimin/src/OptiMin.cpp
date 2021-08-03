@@ -130,8 +130,9 @@ static cl::opt<std::string> InputDir("i", cl::desc("Input directory"),
 static cl::opt<std::string> OutputDir("o", cl::desc("Output directory"),
                                       cl::value_desc("dir"), cl::Required);
 
-static cl::opt<bool>        EdgesOnly("f", cl::desc("Include edge hit counts"),
-                               cl::init(true));
+static cl::opt<bool> EdgesOnly(
+    "e", cl::desc("Solve for edge coverage only, ignore hit counts"),
+    cl::init(false));
 static cl::opt<std::string> WeightsFile("w", cl::desc("Weights file"),
                                         cl::value_desc("csv"));
 
