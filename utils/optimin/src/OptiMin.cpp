@@ -382,7 +382,13 @@ int main(int argc, char *argv[]) {
   // Also check the target arguments, as this determines how we run afl-showmap.
   // ------------------------------------------------------------------------ //
 
-  cl::ParseCommandLineOptions(argc, argv, "Optimal corpus minimizer");
+  std::vector<const char *> Argv;
+  while (*argv)
+    Argv.push_back(*argv++);
+  if (Argv.size() == 1) Argv.push_back("-h");
+
+  cl::ParseCommandLineOptions(Argv.size(), Argv.data(),
+                              "Optimal corpus minimizer");
 
   KeepTraces = !!std::getenv("AFL_KEEP_TRACES");
   SkipBinCheck = !!std::getenv("AFL_SKIP_BIN_CHECK");
@@ -563,7 +569,8 @@ int main(int argc, char *argv[]) {
   // then store this coverage information in the appropriate data structures.
   // ------------------------------------------------------------------------ //
 
-  StatMsg() << "Running afl-showmap on " << SeedFiles.size() << " seeds...\n";
+  StatMsg() << "Obtaining traces for " << SeedFiles.size()
+            << " input files in '" << InputDir << "'...\n";
   StartTimer();
 
   MaxSATSeeds       SeedVars;
