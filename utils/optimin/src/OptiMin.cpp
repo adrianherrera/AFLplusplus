@@ -586,6 +586,11 @@ int main(int argc, char *argv[]) {
 
   }
 
+  EndTimer();
+
+  StatMsg() << "Processing traces for input files in '" << InputDir << "'...\n";
+  StartTimer();
+
   for (const auto &SeedCov : CovMap) {
 
     // Create a variable to represent the seed
@@ -613,6 +618,8 @@ int main(int argc, char *argv[]) {
   }
 
   EndTimer();
+  SuccMsg() << "Found " << SeedCoverage.size() << " unique tuples across "
+            << SeedFiles.size() << " files\n";
 
   // ------------------------------------------------------------------------ //
   // Set the hard and soft constraints in the solver
@@ -677,8 +684,8 @@ int main(int argc, char *argv[]) {
 
   }
 
-  StatMsg() << "Copying " << Solution.size() << " seeds to '" << OutputDir
-            << "'...\n";
+  StatMsg() << "Narrowed down to " << Solution.size() << " files, saving in '"
+            << OutputDir << "...\n";
   StartTimer();
 
   SeedCount = 0;
