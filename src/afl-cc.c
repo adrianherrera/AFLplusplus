@@ -76,6 +76,7 @@ enum {
   INSTRUMENT_OPT_NGRAM = 16,
   INSTRUMENT_OPT_CALLER = 32,
   INSTRUMENT_OPT_CTX_K = 64,
+  INSTRUMENT_OPT_MA = 128,
 
 };
 
@@ -1592,6 +1593,7 @@ int main(int argc, char **argv, char **envp) {
 
   if (getenv("AFL_LLVM_CTX")) instrument_opt_mode |= INSTRUMENT_OPT_CTX;
   if (getenv("AFL_LLVM_CALLER")) instrument_opt_mode |= INSTRUMENT_OPT_CALLER;
+  if (getenv("AFL_LLVM_MA")) instrument_opt_mode |= INSTRUMENT_OPT_MA;
 
   if (getenv("AFL_LLVM_NGRAM_SIZE")) {
 
@@ -1790,6 +1792,13 @@ int main(int argc, char **argv, char **envp) {
         instrument_opt_mode |= (INSTRUMENT_OPT_NGRAM);
         u8 *ptr4 = alloc_printf("%u", ngram_size);
         setenv("AFL_LLVM_NGRAM_SIZE", ptr4, 1);
+
+      }
+
+      if (strncasecmp(ptr2, "mem_access", strlen("mem_access")) == 0) {
+
+        instrument_opt_mode |= INSTRUMENT_OPT_MA;
+        setenv("AFL_LLVM_MA", "1", 1);
 
       }
 
@@ -2059,8 +2068,8 @@ int main(int argc, char **argv, char **envp) {
             "  AFL_LLVM_CMPLOG: log operands of comparisons (RedQueen "
             "mutator)\n"
             "  AFL_LLVM_INSTRUMENT: set instrumentation mode:\n"
-            "    CLASSIC, PCGUARD, LTO, GCC, CLANG, CALLER, CTX, NGRAM-2 "
-            "..-16\n"
+            "    CLASSIC, PCGUARD, LTO, GCC, CLANG, CALLER, CTX, "
+            "NGRAM-2 ..-16, MA\n"
             " You can also use the old environment variables instead:\n"
             "  AFL_LLVM_USE_TRACE_PC: use LLVM trace-pc-guard instrumentation\n"
             "  AFL_LLVM_CALLER: use single context sensitive coverage (for "
@@ -2195,7 +2204,7 @@ int main(int argc, char **argv, char **envp) {
   }
 
   if (instrument_opt_mode && compiler_mode != LLVM)
-    FATAL("CTX, CALLER and NGRAM can only be used in LLVM mode");
+    FATAL("CTX, CALLER, NGRAM and MA can only be used in LLVM mode");
 
   if (!instrument_opt_mode) {
 
@@ -2213,7 +2222,8 @@ int main(int argc, char **argv, char **envp) {
         (instrument_opt_mode & INSTRUMENT_OPT_CTX) ? " + CTX" : "",
         (instrument_opt_mode & INSTRUMENT_OPT_CALLER) ? " + CALLER" : "",
         (instrument_opt_mode & INSTRUMENT_OPT_NGRAM) ? ptr2 : "",
-        (instrument_opt_mode & INSTRUMENT_OPT_CTX_K) ? ptr3 : "");
+        (instrument_opt_mode & INSTRUMENT_OPT_CTX_K) ? ptr3 : "",
+        (instrument_opt_mode & INSTRUMENT_OPT_MA) ? " + MA" : "");
 
     ck_free(ptr2);
     ck_free(ptr3);
@@ -2227,10 +2237,13 @@ int main(int argc, char **argv, char **envp) {
         "(requires LLVM 11 or higher)");
 #endif
 
-  if (instrument_opt_mode && instrument_mode != INSTRUMENT_CLASSIC)
+  if (instrument_opt_mode && instrument_mode == INSTRUMENT_CFG &&
+      instrument_opt_mode & INSTRUMENT_OPT_CTX)
+    FATAL("CFG instrumentation mode supports NGRAM and CALLER, but not CTX.");
+  else if (instrument_opt_mode && instrument_mode != INSTRUMENT_CLASSIC)
     FATAL(
-        "CALLER, CTX and NGRAM instrumentation options can only be used with "
-        "the LLVM CLASSIC instrumentation mode.");
+        "CALLER, CTX, NGRAM and MA instrumentation options can only be used "
+        "with the LLVM CLASSIC instrumentation mode.");
 
   if (getenv("AFL_LLVM_SKIP_NEVERZERO") && getenv("AFL_LLVM_NOT_ZERO"))
     FATAL(

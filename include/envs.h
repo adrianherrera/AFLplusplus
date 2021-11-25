@@ -134,6 +134,7 @@ static char *afl_environment_variables[] = {
     "AFL_LLVM_CALLER",
     "AFL_LLVM_CTX",
     "AFL_LLVM_CTX_K",
+    "AFL_LLVM_MA",
     "AFL_LLVM_DICT2FILE",
     "AFL_LLVM_DICT2FILE_NO_MAIN",
     "AFL_LLVM_DOCUMENT_IDS",

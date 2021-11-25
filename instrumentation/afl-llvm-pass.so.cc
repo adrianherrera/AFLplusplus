@@ -207,6 +207,7 @@ bool AFLCoverage::runOnModule(Module &M) {
   IntegerType *IntLocTy =
       IntegerType::getIntNTy(C, sizeof(PREV_LOC_T) * CHAR_BIT);
 #endif
+  IntegerType *IntPtrTy = M.getDataLayout().getIntPtrType(C);
   struct timeval  tv;
   struct timezone tz;
   u32             rand_seed;
@@ -308,8 +309,10 @@ bool AFLCoverage::runOnModule(Module &M) {
   if (!ctx_k_str) ctx_k_str = getenv("AFL_CTX_K");
   ctx_str = getenv("AFL_LLVM_CTX");
   caller_str = getenv("AFL_LLVM_CALLER");
+  char *ma_str = getenv("AFL_LLVM_MA");
 
   bool instrument_ctx = ctx_str || caller_str;
+  bool instrument_ma = !!ma_str;
 
 #ifdef AFL_HAVE_VECTOR_INTRINSICS
   /* Decide previous location vector size (must be a power of two) */
@@ -411,6 +414,7 @@ bool AFLCoverage::runOnModule(Module &M) {
   GlobalVariable *AFLPrevLoc;
   GlobalVariable *AFLPrevCaller;
   GlobalVariable *AFLContext = NULL;
+  GlobalVariable *AFLMemAccess = NULL;
 
   if (ctx_str || caller_str)
 #if defined(__ANDROID__) || defined(__HAIKU__)
@@ -419,6 +423,16 @@ bool AFLCoverage::runOnModule(Module &M) {
 #else
     AFLContext = new GlobalVariable(
         M, Int32Ty, false, GlobalValue::ExternalLinkage, 0, "__afl_prev_ctx", 0,
+        GlobalVariable::GeneralDynamicTLSModel, 0, false);
+#endif
+
+  if (instrument_ma)
+#if defined(__ANDROID__) || defined(__HAIKU__)
+    AFLMemAccess = new GlobalVariable(
+        M, Int32Ty, false, GlobalValue::ExternalLinkage, 0, "__afl_prev_ma");
+#else
+    AFLMemAccess = new GlobalVariable(
+        M, Int32Ty, false, GlobalValue::ExternalLinkage, 0, "__afl_prev_ma", 0,
         GlobalVariable::GeneralDynamicTLSModel, 0, false);
 #endif
 
@@ -509,9 +523,12 @@ bool AFLCoverage::runOnModule(Module &M) {
   Value    *PrevCtx = NULL;     // CTX sensitive coverage
   LoadInst *PrevCaller = NULL;  // K-CTX coverage
 
+  SmallVector<Instruction *, 16> MemAccessInsts;
+
   /* Instrument all the things! */
 
   int inst_blocks = 0;
+  int inst_mem_accesses = 0;
   scanForDangerousFunctions(&M);
 
   for (auto &F : M) {
@@ -621,6 +638,65 @@ bool AFLCoverage::runOnModule(Module &M) {
 
           }
 
+        }
+
+      }
+
+      // Memory aware coverage
+      if (instrument_ma) {
+
+        // Cache everything so we don't break the instruction iterator
+        MemAccessInsts.clear();
+        for (auto &IN : BB) {
+
+          if (isa<LoadInst>(&IN)) MemAccessInsts.push_back(&IN);
+          else if (isa<StoreInst>(&IN)) MemAccessInsts.push_back(&IN);
+
+        }
+
+        /* Instrument every load/store to update the memory access hash.
+         *
+         * Reads and writes are distinguished by allocating their keys to
+         * different halves of the bitmap.
+         */
+        IRBuilder<> MA_IRB(&BB);
+        for (auto *IN : MemAccessInsts) {
+
+          MA_IRB.SetInsertPoint(IN);
+          Value *Addr = ConstantInt::get(IntPtrTy, 0);
+
+          if (auto *Load = dyn_cast<LoadInst>(IN)) {
+
+            Value *LoadPtr = Load->getPointerOperand();
+
+            Addr = MA_IRB.CreatePtrToInt(LoadPtr, IntPtrTy);
+            Addr = MA_IRB.CreateAnd(Addr, (uint64_t)(map_size - 1));
+
+          } else if (auto *Store = dyn_cast<StoreInst>(IN)) {
+
+            Value *StorePtr = Store->getPointerOperand();
+
+            Addr = MA_IRB.CreatePtrToInt(StorePtr, IntPtrTy);
+            Addr = MA_IRB.CreateAnd(Addr, (uint64_t)(map_size - 1));
+            Addr = MA_IRB.CreateAdd(Addr,
+                                    ConstantInt::get(IntPtrTy, map_size / 2));
+
+          }
+
+          // Update the memory access hash
+
+          Value *AddrCasted = MA_IRB.CreateZExtOrTrunc(Addr, Int32Ty);
+
+          LoadInst *LoadMA = MA_IRB.CreateLoad(AFLMemAccess);
+          LoadMA->setMetadata(M.getMDKindID("nosanitize"),
+                              MDNode::get(C, None));
+
+          Value *NewMemAccess = MA_IRB.CreateXor(LoadMA, AddrCasted);
+          StoreInst *StoreMA = MA_IRB.CreateStore(NewMemAccess, AFLMemAccess);
+          StoreMA->setMetadata(M.getMDKindID("nosanitize"),
+                               MDNode::get(C, None));
+
+          inst_mem_accesses++;
         }
 
       }
@@ -749,8 +825,22 @@ bool AFLCoverage::runOnModule(Module &M) {
       if (instrument_ctx)
         PrevLocTrans =
             IRB.CreateZExt(IRB.CreateXor(PrevLocTrans, PrevCtx), Int32Ty);
-      else
-        PrevLocTrans = IRB.CreateZExt(PrevLocTrans, IRB.getInt32Ty());
+
+      if (instrument_ma) {
+
+        LoadInst *LoadMA = IRB.CreateLoad(AFLMemAccess);
+        LoadMA->setMetadata(M.getMDKindID("nosanitize"),
+                            MDNode::get(C, None));
+
+        PrevLocTrans = IRB.CreateAnd(
+                IRB.CreateXor(PrevLocTrans, LoadMA),
+                (uint64_t)(map_size - 1));
+        PrevLocTrans = IRB.CreateZExt(PrevLocTrans, Int32Ty);
+
+      }
+
+      if (!(instrument_ctx || instrument_ma))
+        PrevLocTrans = IRB.CreateZExt(PrevLocTrans, Int32Ty);
 
       /* Load SHM pointer */
 
@@ -1075,6 +1165,11 @@ bool AFLCoverage::runOnModule(Module &M) {
                getenv("AFL_USE_UBSAN") ? ", UBSAN" : "");
       OKF("Instrumented %d locations (%s mode, ratio %u%%).", inst_blocks,
           modeline, inst_ratio);
+      if (instrument_ma) {
+
+        OKF("Instrumented %d memory accesses.", inst_mem_accesses);
+
+      }
 
     }
 

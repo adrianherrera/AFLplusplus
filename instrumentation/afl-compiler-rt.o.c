@@ -117,10 +117,12 @@ static int __afl_selective_coverage_temp = 1;
 PREV_LOC_T __afl_prev_loc[NGRAM_SIZE_MAX];
 PREV_LOC_T __afl_prev_caller[CTX_MAX_K];
 u32        __afl_prev_ctx;
+u32        __afl_prev_ma;
 #else
 __thread PREV_LOC_T __afl_prev_loc[NGRAM_SIZE_MAX];
 __thread PREV_LOC_T __afl_prev_caller[CTX_MAX_K];
 __thread u32        __afl_prev_ctx;
+__thread u32        __afl_prev_ma;
 #endif
 
 struct cmp_map *__afl_cmp_map;
